@@ -513,6 +513,23 @@ input[type=number].qty-val::-webkit-inner-spin-button,input[type=number].qty-val
   </div>
 </div>
 
+<!-- ======= SECURITE (admin) ======= -->
+<div class="screen" id="screen-securite">
+  <div class="page-header">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h1>🛡 Sécurité</h1><p>Journal des connexions admin</p></div>
+      <button class="btn btn-ghost" id="btn-securite-back" type="button" style="padding:7px 12px;font-size:12px;margin-top:4px">← Retour</button>
+    </div>
+  </div>
+  <div class="content">
+    <div style="display:flex;gap:10px;margin-bottom:16px">
+      <button class="btn btn-ghost btn-full" id="btn-changer-pin" type="button">🔑 Changer le PIN</button>
+      <button class="btn btn-ghost" id="btn-clear-journal" type="button" style="color:var(--danger);border-color:var(--danger)">🗑</button>
+    </div>
+    <div id="securite-journal"></div>
+  </div>
+</div>
+
 <!-- ======= NAV ======= -->
 <nav>
   <button class="nav-btn active" id="nav-home" type="button">
@@ -660,7 +677,8 @@ input[type=number].qty-val::-webkit-inner-spin-button,input[type=number].qty-val
     <div class="modal-handle"></div>
     <h2 style="text-align:center">🔐 Accès Admin</h2>
     <p style="text-align:center;color:var(--text2);font-size:12px;margin-bottom:2px;font-family:'DM Mono',monospace">Entrez votre code PIN</p>
-    <div class="pin-dots"><div class="pin-dot" id="pd0"></div><div class="pin-dot" id="pd1"></div><div class="pin-dot" id="pd2"></div><div class="pin-dot" id="pd3"></div></div>
+    <div id="pin-lock-msg" style="display:none;text-align:center;color:var(--danger);font-family:'DM Mono',monospace;font-size:13px;padding:10px 0 4px"></div>
+    <div class="pin-dots" id="pin-dots-container"><div class="pin-dot" id="pd0"></div><div class="pin-dot" id="pd1"></div><div class="pin-dot" id="pd2"></div><div class="pin-dot" id="pd3"></div><div class="pin-dot" id="pd4"></div><div class="pin-dot" id="pd5"></div></div>
     <div class="pin-error" id="pin-error"></div>
     <div class="pin-keypad">
       <button class="pin-key" data-k="1" type="button">1</button><button class="pin-key" data-k="2" type="button">2</button><button class="pin-key" data-k="3" type="button">3</button>
@@ -669,6 +687,23 @@ input[type=number].qty-val::-webkit-inner-spin-button,input[type=number].qty-val
       <button class="pin-key" id="pin-cancel" type="button" style="font-size:11px;color:var(--text3)">Annuler</button>
       <button class="pin-key" data-k="0" type="button">0</button>
       <button class="pin-key" id="pin-del" type="button" style="font-size:15px">⌫</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CHANGER PIN -->
+<div class="modal-overlay" id="modal-change-pin">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <h2>🔑 Changer le PIN</h2>
+    <p style="color:var(--text2);font-size:12px;margin-bottom:14px;font-family:'DM Mono',monospace">Le nouveau PIN doit faire 6 chiffres minimum</p>
+    <div class="form-group"><label class="form-label">PIN actuel</label><input type="password" inputmode="numeric" class="form-input" id="change-pin-old" placeholder="••••••" maxlength="12" autocomplete="off"></div>
+    <div class="form-group"><label class="form-label">Nouveau PIN</label><input type="password" inputmode="numeric" class="form-input" id="change-pin-new" placeholder="••••••" maxlength="12" autocomplete="off"></div>
+    <div class="form-group"><label class="form-label">Confirmer le nouveau PIN</label><input type="password" inputmode="numeric" class="form-input" id="change-pin-confirm" placeholder="••••••" maxlength="12" autocomplete="off"></div>
+    <div class="pin-error" id="change-pin-error" style="height:auto;margin-bottom:8px"></div>
+    <div style="display:flex;gap:10px;margin-top:4px">
+      <button class="btn btn-ghost" id="btn-cancel-change-pin" type="button" style="flex:1">Annuler</button>
+      <button class="btn btn-primary" id="btn-confirm-change-pin" type="button" style="flex:2">Changer</button>
     </div>
   </div>
 </div>
@@ -794,8 +829,12 @@ let planning = {
   fermetures:[]
 };
 let isAdmin = false;
-const ADMIN_PIN = '1644';
 let pinBuffer = '';
+// PIN stocké hashé dans Firestore (mdl/security). Fallback localStorage.
+// ADMIN_PIN_HASH est chargé au démarrage depuis Firestore ou localStorage.
+// PIN par défaut : 123456 (hash SHA-256)
+const DEFAULT_PIN = '123456';
+let _pinHash = null; // chargé au init
 let materielTab = 'tous';
 let histoTab = 'tous';
 
@@ -948,6 +987,9 @@ async function init(){
   document.getElementById('home-date').textContent=
     new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 
+  // Charger le hash du PIN
+  await loadPinHash();
+
   bindEvents();
   renderHome();
   renderMembres();
@@ -1009,10 +1051,17 @@ function bindEvents(){
 
   // PIN
   bind('pin-del','click',pinDel);
-  bind('pin-cancel','click',()=>{ closeModal('modal-pin'); pinReset(); });
+  bind('pin-cancel','click',()=>{ closeModal('modal-pin'); pinReset(); if(_lockTimer){clearInterval(_lockTimer);_lockTimer=null;} });
   document.querySelectorAll('.pin-key[data-k]').forEach(btn=>{
     btn.addEventListener('click',()=>pinKey(btn.dataset.k));
   });
+  // Changer PIN
+  bind('btn-cancel-change-pin','click',()=>closeModal('modal-change-pin'));
+  bind('btn-confirm-change-pin','click',confirmChangePin);
+  // Ecran sécurité
+  bind('btn-securite-back','click',()=>goTo('home'));
+  bind('btn-changer-pin','click',openChangePinModal);
+  bind('btn-clear-journal','click',clearJournal);
 
   // Planning / Horaires / Fermetures
   bind('btn-cancel-hor','click',()=>closeModal('modal-edit-horaires'));
@@ -1066,6 +1115,14 @@ function navigate(page){
   if(page==='bar') renderBar();
   if(page==='sondages') renderSondages();
   if(page==='infos') renderInfos();
+}
+// goTo : navigation sans nav-btn (pour écrans secondaires)
+function goTo(page){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  const screenEl=document.getElementById('screen-'+page);
+  if(screenEl) screenEl.classList.add('active');
+  if(page==='home'){ const navEl=document.getElementById('nav-home'); if(navEl) navEl.classList.add('active'); renderHome(); }
 }
 
 // ============================================================
@@ -1162,7 +1219,7 @@ function renderHome(){
   // Badge admin
   const ab=document.getElementById('home-admin-badge');
   ab.innerHTML=isAdmin
-    ?'<div class="admin-badge">🛡 Admin <span style="color:var(--text3);cursor:pointer;margin-left:4px" data-action="logout-admin">✕</span></div>'
+    ?'<div style="display:flex;gap:6px;align-items:center"><button class="btn btn-ghost" style="padding:5px 10px;font-size:11px" data-action="open-securite" type="button">🛡 Sécurité</button><div class="admin-badge">Admin <span style="color:var(--text3);cursor:pointer;margin-left:4px" data-action="logout-admin">✕</span></div></div>'
     :'<button class="btn btn-ghost" style="padding:6px 12px;font-size:11px" data-action="open-pin" type="button">🔐 Admin</button>';
 
 
@@ -1930,15 +1987,139 @@ document.addEventListener('click', function(e){
   if(e.target.closest('[data-action="open-pin"]')) openPinModal();
   // Déconnexion admin depuis n'importe quel bouton logout dynamique
   if(e.target.closest('[data-action="logout-admin"]')) logoutAdmin();
+  // Ouvrir écran sécurité
+  if(e.target.closest('[data-action="open-securite"]')){ goTo('securite'); renderSecurite(); }
 });
 
-function openPinModal(){ pinReset(); openModal('modal-pin'); }
-function pinKey(k){ if(pinBuffer.length>=4) return; pinBuffer+=k; updatePinDots(); if(pinBuffer.length===4) setTimeout(checkPin,180); }
-function pinDel(){ pinBuffer=pinBuffer.slice(0,-1); updatePinDots(); document.getElementById('pin-error').textContent=''; }
+// ============================================================
+// SECURITE — SHA-256, blocage localStorage, journal Firestore
+// ============================================================
+async function sha256(str){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function loadPinHash(){
+  // Essaie Firestore d'abord
+  if(window._db){
+    try{
+      const snap=await window._getDoc(window._doc(window._db,'mdl','security'));
+      if(snap.exists()&&snap.data().pinHash){ _pinHash=snap.data().pinHash; return; }
+    }catch(e){}
+  }
+  // Fallback localStorage
+  const stored=localStorage.getItem('mdl-pin-hash');
+  if(stored){ _pinHash=stored; return; }
+  // Défaut : hash de 123456
+  _pinHash=await sha256(DEFAULT_PIN);
+  savePinHash(_pinHash);
+}
+
+function savePinHash(hash){
+  _pinHash=hash;
+  try{ localStorage.setItem('mdl-pin-hash',hash); }catch(e){}
+  if(window._db){
+    window._setDoc(window._doc(window._db,'mdl','security'),{pinHash:hash},{merge:true})
+      .catch(e=>console.warn('savePinHash:',e));
+  }
+}
+
+// Journal tentatives
+async function logTentative(succes, pin_saisi){
+  if(!window._db) return;
+  try{
+    const snap=await window._getDoc(window._doc(window._db,'mdl','security'));
+    const existing=snap.exists()&&snap.data().journal ? snap.data().journal : [];
+    const entry={ts:new Date().toISOString(),succes,ip:'local'};
+    // Garder max 50 entrées
+    const journal=[entry,...existing].slice(0,50);
+    await window._setDoc(window._doc(window._db,'mdl','security'),{journal},{merge:true});
+  }catch(e){ console.warn('logTentative:',e); }
+}
+
+// Blocage localStorage (par appareil)
+const LOCK_KEY='mdl-pin-lock';
+function getLockState(){
+  try{ return JSON.parse(localStorage.getItem(LOCK_KEY)||'{}'); }catch(e){ return {}; }
+}
+function setLockState(obj){ try{ localStorage.setItem(LOCK_KEY,JSON.stringify(obj)); }catch(e){} }
+
+function checkLock(){
+  const s=getLockState();
+  if(!s.until) return null;
+  const remaining=new Date(s.until)-Date.now();
+  if(remaining>0) return {remaining,attempts:s.attempts||0};
+  // Expiré — reset
+  setLockState({});
+  return null;
+}
+
+function recordFailedAttempt(){
+  const s=getLockState();
+  const attempts=(s.attempts||0)+1;
+  let duration=0;
+  if(attempts>=5) duration=2*60*60*1000;      // 2h
+  else if(attempts>=4) duration=30*60*1000;   // 30 min
+  else if(attempts>=3) duration=5*60*1000;    // 5 min
+  const until=duration>0 ? new Date(Date.now()+duration).toISOString() : (s.until||null);
+  setLockState({attempts,until});
+  return {attempts,locked:duration>0};
+}
+
+function resetLock(){ setLockState({}); }
+
+// Affichage countdown blocage
+let _lockTimer=null;
+function showLockCountdown(){
+  const lockMsg=document.getElementById('pin-lock-msg');
+  const keypad=document.querySelector('.pin-keypad');
+  const dots=document.getElementById('pin-dots-container');
+  const lock=checkLock();
+  if(!lock){ if(lockMsg) lockMsg.style.display='none'; if(keypad) keypad.style.display='grid'; if(dots) dots.style.display='flex'; return; }
+  if(lockMsg){ lockMsg.style.display='block'; }
+  if(keypad) keypad.style.display='none';
+  if(dots) dots.style.display='none';
+  function update(){
+    const l=checkLock();
+    if(!l){ if(lockMsg) lockMsg.style.display='none'; if(keypad) keypad.style.display='grid'; if(dots) dots.style.display='flex'; clearInterval(_lockTimer); _lockTimer=null; return; }
+    const s=Math.ceil(l.remaining/1000);
+    const m=Math.floor(s/60); const sec=s%60;
+    if(lockMsg) lockMsg.textContent=`🔒 Trop de tentatives — réessayez dans ${m>0?m+'min ':''} ${sec}s`;
+  }
+  update();
+  if(_lockTimer) clearInterval(_lockTimer);
+  _lockTimer=setInterval(update,1000);
+}
+
+function openPinModal(){
+  pinReset();
+  showLockCountdown();
+  openModal('modal-pin');
+}
+function pinKey(k){
+  if(checkLock()) return;
+  if(pinBuffer.length>=12) return;
+  pinBuffer+=k;
+  updatePinDots();
+  // Auto-valide à 6+ chiffres après 300ms sans nouvelle touche
+  clearTimeout(window._pinAutoCheck);
+  if(pinBuffer.length>=6) window._pinAutoCheck=setTimeout(checkPin,300);
+}
+function pinDel(){ pinBuffer=pinBuffer.slice(0,-1); updatePinDots(); const e=document.getElementById('pin-error'); if(e) e.textContent=''; }
 function pinReset(){ pinBuffer=''; updatePinDots(); const e=document.getElementById('pin-error'); if(e) e.textContent=''; }
-function updatePinDots(){ for(let i=0;i<4;i++){ const d=document.getElementById('pd'+i); if(d) d.className='pin-dot'+(i<pinBuffer.length?' filled':''); } }
-function checkPin(){
-  if(pinBuffer===ADMIN_PIN){
+function updatePinDots(){
+  for(let i=0;i<6;i++){
+    const d=document.getElementById('pd'+i);
+    if(d) d.className='pin-dot'+(i<pinBuffer.length?' filled':'');
+  }
+}
+
+async function checkPin(){
+  if(checkLock()){ showLockCountdown(); pinReset(); return; }
+  const enteredHash=await sha256(pinBuffer);
+  if(enteredHash===_pinHash){
+    resetLock();
+    logTentative(true, null);
     isAdmin=true; closeModal('modal-pin'); pinReset();
     renderHome();
     if(document.getElementById('screen-planning').classList.contains('active')) renderPlanning();
@@ -1948,11 +2129,80 @@ function checkPin(){
     if(document.getElementById('screen-membres').classList.contains('active')) renderMembres();
     showToast('🛡 Mode admin activé','success');
   } else {
+    const {attempts,locked}=recordFailedAttempt();
+    logTentative(false, null);
     const errEl=document.getElementById('pin-error');
-    if(errEl) errEl.textContent='❌ Code incorrect';
+    const restants=Math.max(0,3-attempts);
+    if(locked){
+      if(errEl) errEl.textContent='';
+      showLockCountdown();
+    } else {
+      if(errEl) errEl.textContent=`❌ Code incorrect${restants>0?' — '+restants+' essai'+(restants>1?'s':'')+' restant':''}`;
+    }
     document.querySelectorAll('.pin-dot').forEach(d=>d.style.background='var(--danger)');
     setTimeout(()=>{ pinReset(); document.querySelectorAll('.pin-dot').forEach(d=>d.style.background=''); },700);
   }
+}
+
+// Changer le PIN
+async function openChangePinModal(){
+  document.getElementById('change-pin-old').value='';
+  document.getElementById('change-pin-new').value='';
+  document.getElementById('change-pin-confirm').value='';
+  document.getElementById('change-pin-error').textContent='';
+  openModal('modal-change-pin');
+}
+
+async function confirmChangePin(){
+  const oldVal=document.getElementById('change-pin-old').value.trim();
+  const newVal=document.getElementById('change-pin-new').value.trim();
+  const confVal=document.getElementById('change-pin-confirm').value.trim();
+  const errEl=document.getElementById('change-pin-error');
+  if(!oldVal||!newVal||!confVal){ errEl.textContent='❌ Remplissez tous les champs'; return; }
+  if(newVal.length<6){ errEl.textContent='❌ Le PIN doit faire au moins 6 chiffres'; return; }
+  if(!/^\d+$/.test(newVal)){ errEl.textContent='❌ Le PIN doit contenir uniquement des chiffres'; return; }
+  if(newVal!==confVal){ errEl.textContent='❌ Les nouveaux PINs ne correspondent pas'; return; }
+  const oldHash=await sha256(oldVal);
+  if(oldHash!==_pinHash){ errEl.textContent='❌ PIN actuel incorrect'; return; }
+  const newHash=await sha256(newVal);
+  savePinHash(newHash);
+  closeModal('modal-change-pin');
+  showToast('✅ PIN changé avec succès','success');
+}
+
+// Ecran sécurité
+async function renderSecurite(){
+  const el=document.getElementById('securite-journal');
+  if(!el) return;
+  if(!isAdmin){ goTo('home'); return; }
+  el.innerHTML='<div style="text-align:center;color:var(--text3);font-family:\'DM Mono\',monospace;font-size:13px;padding:20px">Chargement…</div>';
+  if(!window._db){ el.innerHTML='<div style="color:var(--text3);font-family:\'DM Mono\',monospace;font-size:12px;text-align:center;padding:20px">Firebase non connecté — journal indisponible</div>'; return; }
+  try{
+    const snap=await window._getDoc(window._doc(window._db,'mdl','security'));
+    const journal=snap.exists()&&snap.data().journal ? snap.data().journal : [];
+    if(!journal.length){ el.innerHTML='<div style="text-align:center;color:var(--text3);font-family:\'DM Mono\',monospace;font-size:12px;padding:30px">Aucune tentative enregistrée</div>'; return; }
+    el.innerHTML=journal.map(e=>{
+      const d=new Date(e.ts);
+      const dateStr=d.toLocaleDateString('fr-FR',{day:'numeric',month:'short',year:'numeric'});
+      const timeStr=d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      return `<div style="background:var(--surface);border:1px solid ${e.succes?'rgba(16,185,129,.3)':'rgba(239,68,68,.3)'};border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:14px;font-weight:700">${e.succes?'✅ Connexion réussie':'❌ Tentative échouée'}</div>
+          <div style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;margin-top:2px">${dateStr} à ${timeStr}</div>
+        </div>
+        <div style="font-size:20px">${e.succes?'🛡':'⚠️'}</div>
+      </div>`;
+    }).join('');
+  }catch(e){ el.innerHTML='<div style="color:var(--danger);font-size:12px;text-align:center;padding:20px">Erreur de chargement</div>'; }
+}
+
+async function clearJournal(){
+  if(!confirm('Effacer tout le journal ?')) return;
+  if(window._db){
+    await window._setDoc(window._doc(window._db,'mdl','security'),{journal:[]},{merge:true});
+  }
+  renderSecurite();
+  showToast('Journal effacé','success');
 }
 function logoutAdmin(){
   isAdmin=false;
